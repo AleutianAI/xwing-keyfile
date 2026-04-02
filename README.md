@@ -1,8 +1,6 @@
 # xwing-keyfile
 
-A Go library for [X-Wing](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/) hybrid KEM key file serialization. X-Wing combines X25519 and ML-KEM-768 into a single post-quantum/classical hybrid KEM.
-
-This package defines a PEM-based file format for X-Wing key pairs and provides functions to marshal, unmarshal, and fingerprint keys.
+A Go library for [X-Wing](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/) hybrid KEM key file serialization. X-Wing combines X25519 (classical) and ML-KEM-768 (post-quantum) into a single key encapsulation mechanism. This package defines a PEM file format for X-Wing key pairs and provides functions to marshal, unmarshal, and fingerprint keys. It depends only on [Cloudflare CIRCL](https://github.com/cloudflare/circl) and the Go standard library.
 
 ## Install
 
@@ -56,7 +54,7 @@ func main() {
         panic(err)
     }
 
-    // IMPORTANT: Zero private key material after use.
+    // Zero private key material after use.
     for i := range privPEM { privPEM[i] = 0 }
     seed = [32]byte{}
 
@@ -92,8 +90,7 @@ if err != nil {
     return err
 }
 defer func() { seed = [32]byte{} }() // zero when done
-// Also zero the file data:
-for i := range data { data[i] = 0 }
+for i := range data { data[i] = 0 }  // zero file data too
 
 // Re-derive the full key pair from the seed.
 pub, priv := xwing.Scheme().DeriveKeyPair(seed[:])
@@ -117,9 +114,97 @@ if errors.Is(err, xwingkeyfile.ErrBadVersion) {
 
 Available sentinels: `ErrNoPEMBlock`, `ErrWrongPEMType`, `ErrBadMagic`, `ErrBadVersion`, `ErrBadPayloadSize`, `ErrTrailingData`, `ErrInputTooLarge`, `ErrInvalidKey`.
 
-## File Format Specification
+## Independent Key Generation
 
-### Public Key (`.pub`)
+You do not need this package to generate X-Wing keys. Any implementation that produces the correct 1216-byte public key is compatible.
+
+### Using Cloudflare CIRCL directly
+
+```go
+import "github.com/cloudflare/circl/kem/xwing"
+
+scheme := xwing.Scheme()
+pub, priv, _ := scheme.GenerateKeyPair()
+pubBytes, _ := pub.MarshalBinary() // 1216 bytes
+```
+
+### Using a fixed seed (deterministic)
+
+```go
+seed := make([]byte, 32)
+// Fill seed from your own entropy source (HSM, dice rolls, etc.)
+pub, priv := xwing.Scheme().DeriveKeyPair(seed)
+```
+
+### From any ML-KEM-768 + X25519 implementation
+
+The public key is the concatenation:
+
+```
+pubKey = MLKEMPub (1184 bytes) || X25519Pub (32 bytes)
+```
+
+Where `MLKEMPub` is the ML-KEM-768 encapsulation key (FIPS 203) and `X25519Pub` is the X25519 public key (RFC 7748).
+
+## Test Vectors
+
+The `testdata/vectors.json` file contains known-answer test vectors generated with Cloudflare CIRCL v1.6.3 against IETF draft-connolly-cfrg-xwing-kem-05 (final). Each vector specifies a seed, the expected public key bytes, and the expected fingerprint. Use these vectors to verify your implementation produces identical output.
+
+**Warning:** The test vector seeds are public data. Never use them as real private keys.
+
+## Security
+
+- Private key files should be written with `0600` permissions.
+- Zero `[]byte` slices containing private key material after use.
+- Zero the input `data` slice after calling `UnmarshalPrivateKey` — it contains the base64-encoded seed.
+- `MarshalPrivateKey` zeros its internal payload buffer. `UnmarshalPrivateKey` zeros the PEM decode buffer after extracting the seed, including on error paths.
+- `encoding/pem` and `encoding/base64` create internal buffers that cannot be zeroed from user code. This is a known Go limitation. For high-assurance environments, consider `mlockall` and disabling core dumps at the process level.
+- Unmarshal functions reject input larger than 4096 bytes (`MaxInputSize`) and reject trailing data after the PEM block.
+
+## Dependencies
+
+- [Cloudflare CIRCL](https://github.com/cloudflare/circl) v1.6.3 — X-Wing KEM implementation
+- Go standard library (`crypto/sha512`, `encoding/hex`, `encoding/pem`)
+
+No other dependencies.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+---
+
+## Technical Reference
+
+> The sections below cover the file format specification, the cryptographic rationale for X-Wing, and why this package exists. Skip this if you only need the API.
+
+### Why X-Wing
+
+RSA and ECDH key exchange are broken by a sufficiently large quantum computer running Shor's algorithm. This is not a current threat, but ciphertext recorded today can be decrypted later ("harvest now, decrypt later"). For long-lived secrets, the migration window is now.
+
+NIST standardized ML-KEM (FIPS 203, August 2024) as the post-quantum KEM replacement. ML-KEM-768 targets NIST security level 3 (128-bit post-quantum security). However, ML-KEM is based on module lattices, a class of problems with less cryptanalytic history than RSA or elliptic curves. A lattice-specific breakthrough would leave ML-KEM-only systems exposed with no fallback.
+
+X-Wing addresses this by combining ML-KEM-768 with X25519 in a single KEM. The combined scheme is secure if either component is secure. An attacker must break both ML-KEM-768 (lattice) and X25519 (ECDH) to recover the shared secret. This is the standard hedge: deploy post-quantum now, keep classical as insurance.
+
+X-Wing is specified in [IETF draft-connolly-cfrg-xwing-kem-05](https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/) (final). It is a concrete, non-negotiable combination — no algorithm agility, no parameter selection. This reduces implementation risk.
+
+### Why CIRCL
+
+[Cloudflare CIRCL](https://github.com/cloudflare/circl) is the only production-grade Go implementation of X-Wing. It is maintained by Cloudflare's cryptography team, used in Cloudflare's TLS stack, and implements ML-KEM-768 per FIPS 203 and X25519 per RFC 7748. CIRCL's X-Wing implementation passes the IETF test vectors from the draft specification.
+
+There is no Go standard library support for ML-KEM-768 or X-Wing as of Go 1.25. `crypto/mlkem` provides ML-KEM but not the X-Wing combiner. CIRCL is the pragmatic choice.
+
+CIRCL is not FIPS-certified. For environments requiring FIPS 140-3 validation, the Go BoringCrypto build constraint provides FIPS-validated primitives, but does not cover ML-KEM or X-Wing. This is a known gap across the industry — no FIPS-validated X-Wing implementation exists as of 2026.
+
+### Why this package
+
+CIRCL provides the KEM operations (keygen, encapsulate, decapsulate) but no file format. Keys exist only as in-memory Go types. This package solves the serialization problem: how to write keys to disk, read them back, and identify them.
+
+The file format is intentionally minimal. PEM wrapping provides visual identification and copy-paste safety. The binary payload uses a 4-byte magic (`ALT1`) and a version byte to make files self-describing even without PEM headers. Private keys store only the 32-byte seed, not the expanded 2400-byte ML-KEM decapsulation key, because the expansion is deterministic (SHAKE256 per the X-Wing spec) and storing derived material increases attack surface for no benefit.
+
+### File Format Specification
+
+#### Public Key (`.pub`)
 
 ```
 -----BEGIN ALEUTIAN HYBRID KEM PUBLIC KEY-----
@@ -138,7 +223,7 @@ Available sentinels: `ErrNoPEMBlock`, `ErrWrongPEMType`, `ErrBadMagic`, `ErrBadV
 
 Field order matches the canonical X-Wing wire format: ML-KEM first, X25519 second.
 
-### Private Key (`.priv`)
+#### Private Key (`.priv`)
 
 ```
 -----BEGIN ALEUTIAN HYBRID KEM PRIVATE KEY-----
@@ -165,7 +250,7 @@ x25519   = expanded[64:96]   // X25519 private scalar
 
 Storing only the seed minimizes attack surface on disk and aligns with the spec.
 
-### Version Byte Convention
+#### Version Byte Convention
 
 The high bit of the version byte distinguishes key type:
 
@@ -178,78 +263,14 @@ The high bit of the version byte distinguishes key type:
 
 This ensures the binary payload is self-describing even without PEM headers.
 
-### Fingerprint
+#### Fingerprint
 
 The fingerprint is the first 8 bytes of `SHA-512(pubKeyBytes)` rendered as 16 lowercase hex characters (zero-padded), where `pubKeyBytes` is the canonical 1216-byte public key (ML-KEM || X25519).
 
-The fingerprint covers **both** components of the hybrid key. This prevents undetected substitution of the X25519 component.
+The fingerprint covers both components of the hybrid key. If only the ML-KEM component were hashed, substitution of the X25519 component (e.g., with a low-order point) would go undetected.
 
 **Privacy note:** The fingerprint is a stable, deterministic identifier. It functions as a pseudonymous correlator — do not include it in cross-context logs or expose it to third parties without considering linkability implications.
 
-### Input Size Limits
+#### Input Size Limits
 
 Unmarshal functions reject input larger than 4096 bytes (`MaxInputSize`) and reject trailing data after the PEM block. This prevents denial-of-service via oversized inputs.
-
-## Independent Key Generation
-
-You do not need this package (or any Aleutian software) to generate X-Wing keys. Any implementation that produces the correct 1216-byte public key is compatible.
-
-### Using Cloudflare CIRCL (Go)
-
-```go
-import "github.com/cloudflare/circl/kem/xwing"
-
-scheme := xwing.Scheme()
-pub, priv, _ := scheme.GenerateKeyPair()
-pubBytes, _ := pub.MarshalBinary() // 1216 bytes -- upload this
-```
-
-### Using a Fixed Seed (deterministic)
-
-```go
-seed := make([]byte, 32)
-// Fill seed from your own entropy source (HSM, dice rolls, etc.)
-pub, priv := xwing.Scheme().DeriveKeyPair(seed)
-```
-
-### From Any ML-KEM-768 + X25519 Implementation
-
-The public key is simply the concatenation:
-
-```
-pubKey = MLKEMPub (1184 bytes) || X25519Pub (32 bytes)
-```
-
-Where:
-- `MLKEMPub` is the ML-KEM-768 encapsulation key (FIPS 203)
-- `X25519Pub` is the X25519 public key (RFC 7748)
-
-The private key seed is expanded via SHAKE256 (FIPS 202) as shown in the file format section above.
-
-## Test Vectors
-
-The `testdata/vectors.json` file contains known-answer test vectors generated with Cloudflare CIRCL v1.6.3 against IETF draft-connolly-cfrg-xwing-kem-05 (final). Each vector specifies a seed, the expected public key bytes, and the expected fingerprint.
-
-Use these vectors to verify your implementation produces identical output.
-
-**Warning:** The test vector seeds are public data. Never use them as real private keys.
-
-## Dependencies
-
-- [Cloudflare CIRCL](https://github.com/cloudflare/circl) v1.6.3 -- X-Wing KEM implementation
-- Go standard library (`crypto/sha512`, `encoding/hex`, `encoding/pem`)
-
-No other dependencies. No Aleutian-internal code.
-
-## Security
-
-- Private key files should be written with `0600` permissions (owner read/write only).
-- Always zero `[]byte` slices containing private key material after use.
-- Zero the input `data` slice after calling `UnmarshalPrivateKey` — it contains the base64-encoded seed.
-- `MarshalPrivateKey` zeros its internal payload buffer, and `UnmarshalPrivateKey` zeros the PEM decode buffer after extracting the seed.
-- `encoding/pem` and `encoding/base64` create internal buffers that cannot be zeroed from user code. This is a known limitation of Go's memory model. For high-assurance environments, consider `mlockall` and disabling core dumps at the process level.
-- Limit file reads to prevent DoS — `UnmarshalPublicKey` and `UnmarshalPrivateKey` reject input larger than 4096 bytes.
-
-## License
-
-MIT -- see [LICENSE](LICENSE).
