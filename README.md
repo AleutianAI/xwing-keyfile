@@ -5,7 +5,7 @@ A Go library for [X-Wing](https://datatracker.ietf.org/doc/draft-connolly-cfrg-x
 ## Install
 
 ```
-go get github.com/aleutian-ai/xwing-keyfile
+go get github.com/AleutianAI/xwing-keyfile
 ```
 
 ## Usage
@@ -17,7 +17,7 @@ import (
     "fmt"
     "os"
 
-    xwingkeyfile "github.com/aleutian-ai/xwing-keyfile"
+    xwingkeyfile "github.com/AleutianAI/xwing-keyfile"
     "github.com/cloudflare/circl/kem/xwing"
 )
 

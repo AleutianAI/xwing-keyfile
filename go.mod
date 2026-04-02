@@ -1,4 +1,4 @@
-module github.com/aleutian-ai/xwing-keyfile
+module github.com/AleutianAI/xwing-keyfile
 
 go 1.25.6
 
