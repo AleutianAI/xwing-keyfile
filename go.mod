@@ -1,6 +1,6 @@
-module github.com/AleutianAI/xwing-keyfile
+module github.com/aleutian-ai/xwing-keyfile
 
-go 1.25.6
+go 1.24.0
 
 require github.com/cloudflare/circl v1.6.3
 
